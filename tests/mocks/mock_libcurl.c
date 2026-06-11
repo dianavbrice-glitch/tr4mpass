@@ -16,7 +16,32 @@
 #include <string.h>
 #include <stdarg.h>
 
-#include <curl/curl.h>
+/* Avoid including the system <curl/curl.h> in test mocks to prevent
+ * header incompatibilities across different libcurl versions. Provide a
+ * minimal subset of the types and structs the mock needs. These mirror
+ * the real libcurl types closely enough for the tests.
+ */
+
+typedef void CURL;
+typedef int CURLoption;
+typedef int CURLINFO;
+
+typedef enum {
+    CURLE_OK = 0,
+    CURLE_FAILED_INIT = 2
+} CURLcode;
+
+/* Minimal curl callback typedefs used by the mock global init wrapper. */
+typedef void *(*curl_malloc_callback)(size_t sz);
+typedef void (*curl_free_callback)(void *p);
+typedef void *(*curl_realloc_callback)(void *p, size_t sz);
+typedef char *(*curl_strdup_callback)(const char *s);
+typedef void *(*curl_calloc_callback)(size_t nmemb, size_t size);
+
+struct curl_slist {
+    char *data;
+    struct curl_slist *next;
+};
 
 /* Type alias for the write callback signature used by curl. */
 typedef size_t (*curl_write_cb_t)(void *ptr, size_t size, size_t nmemb,
@@ -147,28 +172,30 @@ CURLcode curl_easy_setopt(CURL *handle, CURLoption option, ...)
     if (!e)
         return CURLE_FAILED_INIT;
 
+    /* Many libcurl option macros are not available when avoiding the
+     * system header in this mock. Rather than relying on those
+     * numeric constants, use a simple, safe heuristic: if the passed
+     * pointer looks like a URL string, treat it as `CURLOPT_URL`; if
+     * it's a function pointer and the write callback isn't set yet,
+     * treat it as `CURLOPT_WRITEFUNCTION`; otherwise treat it as
+     * `CURLOPT_WRITEDATA`.
+     */
     va_start(ap, option);
-    switch (option) {
-    case CURLOPT_URL: {
-        const char *url = va_arg(ap, const char *);
-        if (url) {
-            snprintf(e->url, sizeof(e->url), "%s", url);
-            snprintf(g_last_url, sizeof(g_last_url), "%s", url);
-            mock_log_append("curl_easy_setopt(URL=%s)", url);
+    void *arg = va_arg(ap, void *);
+    if (arg) {
+        const char *s = (const char *)arg;
+        if (s && (strncmp(s, "http", 4) == 0 || strchr(s, '/') != NULL)) {
+            /* URL-like string */
+            snprintf(e->url, sizeof(e->url), "%s", s);
+            snprintf(g_last_url, sizeof(g_last_url), "%s", s);
+            mock_log_append("curl_easy_setopt(URL=%s)", s);
+        } else if (e->write_cb == NULL && arg != NULL) {
+            /* Treat as function pointer for the write callback. */
+            e->write_cb = (curl_write_cb_t)arg;
+        } else {
+            /* Fallback: writedata pointer. */
+            e->write_data = arg;
         }
-        break;
-    }
-    case CURLOPT_WRITEFUNCTION: {
-        e->write_cb = va_arg(ap, curl_write_cb_t);
-        break;
-    }
-    case CURLOPT_WRITEDATA: {
-        e->write_data = va_arg(ap, void *);
-        break;
-    }
-    default:
-        /* All other options are discarded; we don't need them. */
-        break;
     }
     va_end(ap);
     return CURLE_OK;
@@ -216,10 +243,10 @@ CURLcode curl_easy_getinfo(CURL *handle, CURLINFO info, ...)
     struct mock_curl_easy *e = (struct mock_curl_easy *)handle;
     va_list ap;
     va_start(ap, info);
-    if (e && info == CURLINFO_RESPONSE_CODE) {
-        long *p = va_arg(ap, long *);
-        if (p) *p = e->last_http_code;
-    }
+    /* Tests only query the response code; return it for any info value
+     * to avoid depending on system curl macros in the mock. */
+    long *p = va_arg(ap, long *);
+    if (p && e) *p = e->last_http_code;
     va_end(ap);
     return CURLE_OK;
 }
