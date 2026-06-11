@@ -179,6 +179,25 @@ int usb_dfu_read_info(libusb_device_handle *handle, uint32_t *cpid,
     buf[ret] = '\0';
     log_debug("DFU serial string: %s", (char *)buf);
 
+    /* Some devices expose the full serial string on string descriptor 4. */
+    /* If descriptor 3 returns only the generic product string, fall back. */
+    if (strncmp((char *)buf, "Apple Mobile Device", 19) == 0) {
+        log_debug("DFU serial index %d returned generic product string, retrying index %d",
+                  DFU_SERIAL_INDEX, DFU_SERIAL_INDEX + 1);
+        ret = libusb_get_string_descriptor_ascii(handle, DFU_SERIAL_INDEX + 1,
+                                                 buf, sizeof(buf));
+        if (ret >= 0) {
+            if (ret >= (int)sizeof(buf))
+                ret = (int)sizeof(buf) - 1;
+            buf[ret] = '\0';
+            log_debug("DFU serial string (idx %d): %s", DFU_SERIAL_INDEX + 1,
+                      (char *)buf);
+        } else {
+            log_warn("fallback serial descriptor read failed: %s",
+                     libusb_strerror(ret));
+        }
+    }
+
     /* Copy full serial string to caller */
     if (serial && serial_len > 0) {
         strncpy(serial, (char *)buf, serial_len - 1);
